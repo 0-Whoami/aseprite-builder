@@ -1,0 +1,339 @@
+name: Build Aseprite (All Platforms)
+
+on:
+  workflow_dispatch:
+    inputs:
+      aseprite_version:
+        description: 'Aseprite version tag (leave empty for latest)'
+        required: false
+        default: ''
+
+jobs:
+  fetch-version:
+    name: Fetch Aseprite Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      download_url: ${{ steps.get-version.outputs.download_url }}
+    steps:
+      - name: Get Aseprite Version
+        id: get-version
+        run: |
+          if [[ -n "${{ github.event.inputs.aseprite_version }}" ]]; then
+            VERSION="${{ github.event.inputs.aseprite_version }}"
+            echo "Using specified version: $VERSION"
+          else
+            echo "Fetching latest release..."
+            RELEASE_JSON=$(curl -s https://api.github.com/repos/aseprite/aseprite/releases/latest)
+            VERSION=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+            echo "Latest version: $VERSION"
+          fi
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "download_url=https://github.com/aseprite/aseprite/archive/refs/tags/${VERSION}.zip" >> $GITHUB_OUTPUT
+
+  build-windows:
+    name: Build Windows
+    needs: fetch-version
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Enable Long Paths
+        run: git config --system core.longpaths true
+
+      - name: Install Build Tools
+        run: choco install cmake ninja -y --no-progress
+
+      - name: Clone Aseprite Source
+        run: |
+          git clone --recursive --depth 1 --branch ${{ needs.fetch-version.outputs.version }} https://github.com/aseprite/aseprite.git
+
+      - name: Download & Extract Skia
+        shell: powershell
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/aseprite/skia/releases/download/m102-861e4743af/Skia-Windows-Release-x64.zip" -OutFile "skia.zip" -UseBasicParsing
+          Expand-Archive -Force "skia.zip" "skia"
+          Write-Host "Skia extracted successfully"
+
+      - name: Initialize MSVC Environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure Build
+        shell: powershell
+        run: |
+          mkdir build -Force
+          cd build
+          cmake -G Ninja `
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo `
+            -DLAF_BACKEND=skia `
+            -DSKIA_DIR="$env:GITHUB_WORKSPACE\skia" `
+            -DSKIA_LIBRARY_DIR="$env:GITHUB_WORKSPACE\skia\out\Release-x64" `
+            -DENABLE_UPDATER=OFF `
+            -DENABLE_TESTS=OFF `
+            "$env:GITHUB_WORKSPACE\aseprite"
+
+      - name: Compile
+        run: |
+          cd build
+          ninja -j 4
+
+      - name: Create Portable Package
+        shell: powershell
+        run: |
+          cd build\bin
+          "# This file is here so Aseprite behaves as a portable program" | Out-File -FilePath "aseprite.ini" -Encoding ASCII
+          Compress-Archive -Path * -DestinationPath "$env:GITHUB_WORKSPACE\Aseprite-${{ needs.fetch-version.outputs.version }}-Windows.zip"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aseprite-${{ needs.fetch-version.outputs.version }}-Windows
+          path: Aseprite-${{ needs.fetch-version.outputs.version }}-Windows.zip
+
+  build-linux:
+    name: Build Linux
+    needs: fetch-version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            g++ clang cmake ninja-build libx11-dev libxcursor-dev \
+            libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev \
+            libfreetype6-dev libharfbuzz-dev libpixman-1-dev zlib1g-dev
+
+      - name: Clone Aseprite Source
+        run: |
+          git clone --recursive --depth 1 --branch ${{ needs.fetch-version.outputs.version }} https://github.com/aseprite/aseprite.git
+
+      - name: Download & Extract Skia
+        run: |
+          wget https://github.com/aseprite/skia/releases/download/m102-861e4743af/Skia-Linux-Release-x64-libstdc++.zip
+          unzip Skia-Linux-Release-x64-libstdc++.zip -d skia
+
+      - name: Configure Build
+        run: |
+          export CC=clang
+          export CXX=clang++
+          mkdir build
+          cd build
+          cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS=-stdlib=libstdc++ \
+            -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libstdc++ \
+            -DLAF_BACKEND=skia \
+            -DSKIA_DIR=$GITHUB_WORKSPACE/skia \
+            -DSKIA_LIBRARY_DIR=$GITHUB_WORKSPACE/skia/out/Release-x64 \
+            -DENABLE_UPDATER=OFF \
+            -DENABLE_TESTS=OFF \
+            $GITHUB_WORKSPACE/aseprite
+
+      - name: Compile
+        run: |
+          cd build
+          ninja -j $(nproc)
+
+      - name: Create Portable Package
+        run: |
+          cd build/bin
+          echo '# This file is here so Aseprite behaves as a portable program' > aseprite.ini
+          tar -czf $GITHUB_WORKSPACE/Aseprite-${{ needs.fetch-version.outputs.version }}-Linux.tar.gz *
+
+      - name: Build .deb Package
+        run: |
+          VERSION=${{ needs.fetch-version.outputs.version }}
+          VERSION_CLEAN=${VERSION#v}
+          
+          mkdir -p aseprite_deb/opt/aseprite
+          mkdir -p aseprite_deb/usr/bin
+          mkdir -p aseprite_deb/usr/share/applications
+          mkdir -p aseprite_deb/DEBIAN
+          
+          cp -r build/bin/* aseprite_deb/opt/aseprite/
+          
+          ln -s /opt/aseprite/aseprite aseprite_deb/usr/bin/aseprite
+          
+          cat <<EOF > aseprite_deb/DEBIAN/control
+          Package: aseprite
+          Version: $VERSION_CLEAN
+          Section: graphics
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Aseprite Builder
+          Description: Animated sprite editor & pixel art tool
+           Aseprite is a pixel art tool to create 2D animations, sprites, and any kind of graphics for games.
+          EOF
+          
+          cat <<EOF > aseprite_deb/usr/share/applications/aseprite.desktop
+          [Desktop Entry]
+          Name=Aseprite
+          Comment=Animated sprite editor & pixel art tool
+          Exec=/opt/aseprite/aseprite
+          Icon=/opt/aseprite/data/icons/ase64.png
+          Terminal=false
+          Type=Application
+          Categories=Graphics;2DGraphics;RasterGraphics;
+          EOF
+          
+          dpkg-deb --build aseprite_deb Aseprite-${{ needs.fetch-version.outputs.version }}-Linux.deb
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aseprite-${{ needs.fetch-version.outputs.version }}-Linux
+          path: |
+            Aseprite-${{ needs.fetch-version.outputs.version }}-Linux.tar.gz
+            Aseprite-${{ needs.fetch-version.outputs.version }}-Linux.deb
+
+  build-macos-arm64:
+    name: Build macOS (Apple Silicon)
+    needs: fetch-version
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          brew install ninja
+
+      - name: Clone Aseprite Source
+        run: |
+          git clone --recursive --depth 1 --branch ${{ needs.fetch-version.outputs.version }} https://github.com/aseprite/aseprite.git
+
+      - name: Download & Extract Skia
+        run: |
+          wget https://github.com/aseprite/skia/releases/download/m102-861e4743af/Skia-macOS-Release-arm64.zip
+          unzip Skia-macOS-Release-arm64.zip -d skia
+
+      - name: Configure Build
+        run: |
+          mkdir build
+          cd build
+          cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+            -DLAF_BACKEND=skia \
+            -DSKIA_DIR=$GITHUB_WORKSPACE/skia \
+            -DSKIA_LIBRARY_DIR=$GITHUB_WORKSPACE/skia/out/Release-arm64 \
+            -DENABLE_UPDATER=OFF \
+            -DENABLE_TESTS=OFF \
+            $GITHUB_WORKSPACE/aseprite
+
+      - name: Compile
+        run: |
+          cd build
+          ninja -j $(sysctl -n hw.ncpu)
+
+      - name: Create Portable Package
+        run: |
+          cd build/bin
+          echo '# This file is here so Aseprite behaves as a portable program' > aseprite.ini
+          zip -r $GITHUB_WORKSPACE/Aseprite-${{ needs.fetch-version.outputs.version }}-macOS-arm64.zip Aseprite.app aseprite.ini
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aseprite-${{ needs.fetch-version.outputs.version }}-macOS-arm64
+          path: Aseprite-${{ needs.fetch-version.outputs.version }}-macOS-arm64.zip
+
+  build-macos-x64:
+    name: Build macOS (Intel)
+    needs: fetch-version
+    runs-on: macos-13
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          brew install ninja
+
+      - name: Clone Aseprite Source
+        run: |
+          git clone --recursive --depth 1 --branch ${{ needs.fetch-version.outputs.version }} https://github.com/aseprite/aseprite.git
+
+      - name: Download & Extract Skia
+        run: |
+          wget https://github.com/aseprite/skia/releases/download/m102-861e4743af/Skia-macOS-Release-x64.zip
+          unzip Skia-macOS-Release-x64.zip -d skia
+
+      - name: Configure Build
+        run: |
+          mkdir build
+          cd build
+          cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.9 \
+            -DLAF_BACKEND=skia \
+            -DSKIA_DIR=$GITHUB_WORKSPACE/skia \
+            -DSKIA_LIBRARY_DIR=$GITHUB_WORKSPACE/skia/out/Release-x64 \
+            -DENABLE_UPDATER=OFF \
+            -DENABLE_TESTS=OFF \
+            $GITHUB_WORKSPACE/aseprite
+
+      - name: Compile
+        run: |
+          cd build
+          ninja -j $(sysctl -n hw.ncpu)
+
+      - name: Create Portable Package
+        run: |
+          cd build/bin
+          echo '# This file is here so Aseprite behaves as a portable program' > aseprite.ini
+          zip -r $GITHUB_WORKSPACE/Aseprite-${{ needs.fetch-version.outputs.version }}-macOS-x64.zip Aseprite.app aseprite.ini
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aseprite-${{ needs.fetch-version.outputs.version }}-macOS-x64
+          path: Aseprite-${{ needs.fetch-version.outputs.version }}-macOS-x64.zip
+
+  create-release:
+    name: Create GitHub Release
+    needs: [fetch-version, build-windows, build-linux, build-macos-arm64, build-macos-x64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: success()
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.fetch-version.outputs.version }}
+          name: Aseprite ${{ needs.fetch-version.outputs.version }}
+          body: |
+            Aseprite ${{ needs.fetch-version.outputs.version }} - Multi-platform builds
+            
+            **Downloads:**
+            - Windows: Aseprite-${{ needs.fetch-version.outputs.version }}-Windows.zip
+            - Linux: Aseprite-${{ needs.fetch-version.outputs.version }}-Linux.tar.gz (portable) / .deb (package)
+            - macOS (Apple Silicon): Aseprite-${{ needs.fetch-version.outputs.version }}-macOS-arm64.zip
+            - macOS (Intel): Aseprite-${{ needs.fetch-version.outputs.version }}-macOS-x64.zip
+            
+            **Note:** These builds are for personal use only. Please support the developers by purchasing Aseprite at https://www.aseprite.org/
+          files: |
+            artifacts/**/*.zip
+            artifacts/**/*.tar.gz
+            artifacts/**/*.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

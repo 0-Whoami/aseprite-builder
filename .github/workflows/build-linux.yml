@@ -11,42 +11,57 @@ on:
 jobs:
   build-linux:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    permissions:
+      contents: write
 
     steps:
-      - name: Checkout Aseprite
+      - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          repository: aseprite/aseprite
-          ref: ${{ github.event.inputs.aseprite_version }}
-          submodules: 'recursive'
 
       - name: Install Linux Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y g++ clang cmake ninja-build libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev
+          sudo apt-get install -y \
+            g++ clang cmake ninja-build libx11-dev libxcursor-dev \
+            libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev \
+            libfreetype6-dev libharfbuzz-dev libpixman-1-dev zlib1g-dev
+
+      - name: Clone Aseprite Source
+        run: |
+          git clone --recursive --depth 1 --branch ${{ github.event.inputs.aseprite_version }} https://github.com/aseprite/aseprite.git
 
       - name: Download Skia (Linux)
         run: |
-          # Using the stable m124-08a5439a6b release
-          wget https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Linux-Release-x64-libstdc++.zip
+          wget https://github.com/aseprite/skia/releases/download/m102-861e4743af/Skia-Linux-Release-x64-libstdc++.zip
           unzip Skia-Linux-Release-x64-libstdc++.zip -d skia
 
-      - name: Compile Aseprite
+      - name: Configure Build
         run: |
           export CC=clang
           export CXX=clang++
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_FLAGS:STRING=-stdlib=libstdc++ \
-            -DCMAKE_EXE_LINKER_FLAGS:STRING=-stdlib=libstdc++ \
+          mkdir build
+          cd build
+          cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS=-stdlib=libstdc++ \
+            -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libstdc++ \
             -DLAF_BACKEND=skia \
             -DSKIA_DIR=$GITHUB_WORKSPACE/skia \
             -DSKIA_LIBRARY_DIR=$GITHUB_WORKSPACE/skia/out/Release-x64 \
-            -DENABLE_TESTS=OFF
+            -DENABLE_UPDATER=OFF \
+            -DENABLE_TESTS=OFF \
+            $GITHUB_WORKSPACE/aseprite
+
+      - name: Compile
+        run: |
           cd build
-          ninja aseprite
+          ninja -j $(nproc)
+
+      - name: Create Portable Package
+        run: |
+          cd build/bin
+          echo '# This file is here so Aseprite behaves as a portable program' > aseprite.ini
+          tar -czf $GITHUB_WORKSPACE/aseprite-${{ github.event.inputs.aseprite_version }}-linux-portable.tar.gz *
 
       - name: Build .deb Package
         run: |
@@ -55,10 +70,10 @@ jobs:
           
           mkdir -p aseprite_deb/opt/aseprite
           mkdir -p aseprite_deb/usr/bin
+          mkdir -p aseprite_deb/usr/share/applications
           mkdir -p aseprite_deb/DEBIAN
           
-          cp build/bin/aseprite aseprite_deb/opt/aseprite/
-          cp -r build/bin/data aseprite_deb/opt/aseprite/
+          cp -r build/bin/* aseprite_deb/opt/aseprite/
           
           ln -s /opt/aseprite/aseprite aseprite_deb/usr/bin/aseprite
           
@@ -70,16 +85,21 @@ jobs:
           Architecture: amd64
           Maintainer: Aseprite Builder
           Description: Animated sprite editor & pixel art tool
+           Aseprite is a pixel art tool to create 2D animations, sprites, and any kind of graphics for games.
+          EOF
+          
+          cat <<EOF > aseprite_deb/usr/share/applications/aseprite.desktop
+          [Desktop Entry]
+          Name=Aseprite
+          Comment=Animated sprite editor & pixel art tool
+          Exec=/opt/aseprite/aseprite
+          Icon=/opt/aseprite/data/icons/ase64.png
+          Terminal=false
+          Type=Application
+          Categories=Graphics;2DGraphics;RasterGraphics;
           EOF
           
           dpkg-deb --build aseprite_deb aseprite-${VERSION}-linux.deb
-
-      - name: Build Portable Archive (.tar.gz)
-        run: |
-          VERSION=${{ github.event.inputs.aseprite_version }}
-          cd build/bin
-          tar -czvf ../../aseprite-${VERSION}-linux-portable.tar.gz ./*
-          cd ../../
 
       - name: Upload Linux Artifacts
         uses: actions/upload-artifact@v4
