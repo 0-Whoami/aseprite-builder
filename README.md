@@ -2,7 +2,7 @@
 
 This project provides an easy, automated way to get your own copy of **Aseprite** by building it directly from the official source code. 
 
-Aseprite is "source-available" software. This means while the pre-made versions are paid, the creators allow you to compile the code yourself for personal use. This repository does all the hard work for you—automatically setting up the environment and creating a ready-to-use installer.
+Aseprite is "source-available" software. This means while the pre-made versions are paid, the creators allow you to compile the code yourself for personal use. This repository does all the hard work for you-automatically setting up the environment and creating a ready-to-use installer.
 
 ---
 
