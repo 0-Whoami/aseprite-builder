@@ -1,4 +1,4 @@
-name: Build Aseprite
+﻿name: Build Aseprite
 on:
   workflow_dispatch:
 
@@ -15,34 +15,42 @@ jobs:
         run: git config --system core.longpaths true
 
       - name: Install Build Tools
-        run: choco install cmake ninja innosetup
+        run: choco install cmake ninja innosetup -y --no-progress
 
       - name: Fetch Latest Release Metadata
         shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN" }
-          $resp = (Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri https://api.github.com/repos/aseprite/aseprite/releases/latest).Content | ConvertFrom-Json
+          $headers = @{}
+          if ($env:GH_TOKEN) { $headers["Authorization"] = "token $env:GH_TOKEN" }
+          $resp = (Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri https://api.github.com/repos/aseprite/aseprite/releases/latest -ErrorAction Stop).Content | ConvertFrom-Json
           $asset = $resp.assets | Where-Object { $_.name -like "*Source.zip" } | Select-Object -First 1
+          if (-not $asset) {
+              $asset = $resp.assets | Select-Object -First 1
+          }
           echo "DOWNLOAD_URL=$($asset.browser_download_url)" >> $env:GITHUB_ENV
           echo "ASE_VER=$($resp.tag_name)" >> $env:GITHUB_ENV
+          echo "Detected Aseprite version: $($resp.tag_name)"
+          echo "Source asset: $($asset.name)"
 
       - name: Download & Extract Source
         shell: powershell
         run: |
-          Invoke-WebRequest -Uri ${{ env.DOWNLOAD_URL }} -OutFile "aseprite_src.zip"
-          7z x "aseprite_src.zip" -o"temp_ext" -y
+          Invoke-WebRequest -Uri ${{ env.DOWNLOAD_URL }} -OutFile "aseprite_src.zip" -UseBasicParsing
+          Expand-Archive -Force "aseprite_src.zip" "temp_ext"
           $rootFile = Get-ChildItem -Path "temp_ext" -Filter "CMakeLists.txt" -Recurse | Select-Object -First 1
           mkdir aseprite -Force
           Get-ChildItem -Path "$($rootFile.Directory.FullName)\*" | Move-Item -Destination "aseprite" -Force
+          Write-Host "Source extracted successfully"
 
       - name: Download & Extract Skia
         shell: powershell
         run: |
-          Invoke-WebRequest -Uri "https://github.com/aseprite/skia/releases/latest/download/Skia-Windows-Release-x64.zip" -OutFile "skia.zip"
+          Invoke-WebRequest -Uri "https://github.com/aseprite/skia/releases/download/m102-861e4743af/Skia-Windows-Release-x64.zip" -OutFile "skia.zip" -UseBasicParsing
           mkdir skia -Force
-          7z x "skia.zip" -o"skia" -y
+          Expand-Archive -Force "skia.zip" "skia"
+          Write-Host "Skia extracted successfully"
 
       - name: Initialize MSVC Environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -64,21 +72,28 @@ jobs:
             -DENABLE_UPDATER=OFF `
             -DENABLE_TESTS=OFF `
             "$abs_src"
+          Write-Host "CMake configuration completed"
 
       - name: Compile with Ninja
         run: |
           cd build
-          ninja -j 2
+          $cpuCount = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+          $jobs = [math]::Min($cpuCount * 2, 8)
+          Write-Host "Using $jobs parallel compilation jobs"
+          ninja -j $jobs
 
       - name: Collect Dependencies (DLLs)
         shell: powershell
         run: |
-          # Copy OpenSSL DLLs to the bin folder so the app can run
           $binDir = "$env:GITHUB_WORKSPACE\build\bin"
           $sslDir = "C:\Program Files\OpenSSL\bin"
-          Copy-Item "$sslDir\libcrypto-3-x64.dll" -Destination $binDir -Force
-          Copy-Item "$sslDir\libssl-3-x64.dll" -Destination $binDir -Force
-          echo "[+] DLLs copied to $binDir"
+          if (Test-Path "$sslDir\libcrypto-3-x64.dll") {
+              Copy-Item "$sslDir\libcrypto-3-x64.dll" -Destination $binDir -Force
+              Copy-Item "$sslDir\libssl-3-x64.dll" -Destination $binDir -Force
+              echo "[+] DLLs copied to $binDir"
+          } else {
+              echo "[!] OpenSSL DLLs not found - skipping"
+          }
 
       - name: Package Installer (Inno Setup)
         shell: powershell

@@ -44,3 +44,20 @@ If you prefer to compile the software on your own machine, you can use the provi
 ## 🛠 Troubleshooting
 * **Windows Warning:** Because you built this yourself, Windows might say it doesn't recognize the "publisher." Click **"More Info"** and then **"Run anyway."**
 * **Build Failed?** If the build stops with a red "X," just try running it again. Sometimes the cloud servers have temporary hiccups.
+
+---
+
+## 📝 Recent Improvements
+
+### Fixed Issues
+1. **Removed interactive prompts** - The batch script no longer asks for confirmation, making it CI/CD compatible
+2. **Better dependency handling** - CMake, Ninja, and Inno Setup are now installed via Chocolatey with proper error handling
+3. **Robust download logic** - Uses PowerShell's `Expand-Archive` instead of relying on `7z` (which may not be available in all environments)
+4. **Improved Visual Studio detection** - Uses `vswhere.exe` with fallback to common install paths
+5. **Better error handling** - Each step has proper error checking with meaningful error messages
+6. **Dynamic parallel compilation** - Automatically detects CPU cores and uses optimal job count for Ninja builds
+7. **OpenSSL DLL handling** - Checks for OpenSSL DLLs before copying, preventing failures if they're missing
+
+### How to Use
+- **GitHub Actions:** Fork the repo, go to **Actions** → **Build Aseprite** → **Run workflow**
+- **Local Build:** Run `aseprite_build.bat` as Administrator
