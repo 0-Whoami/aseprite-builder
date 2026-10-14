@@ -44,13 +44,16 @@ jobs:
           Get-ChildItem -Path "$($rootFile.Directory.FullName)\*" | Move-Item -Destination "aseprite" -Force
           Write-Host "Source extracted successfully"
 
+      
       - name: Download & Extract Skia
         shell: powershell
         run: |
-          Invoke-WebRequest -Uri https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Windows-Release-x64.zip" -OutFile "skia.zip" -UseBasicParsing
-          mkdir skia -Force
+          $ErrorActionPreference = "Stop"
+          $url = "https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Windows-Release-x64.zip"
+          Invoke-WebRequest -Uri $url -OutFile "skia.zip" -UseBasicParsing
           Expand-Archive -Force "skia.zip" "skia"
           Write-Host "Skia extracted successfully"
+
 
       - name: Initialize MSVC Environment
         uses: ilammy/msvc-dev-cmd@v1
